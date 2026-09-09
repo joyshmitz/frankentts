@@ -44,6 +44,13 @@
     .pg-btn.primary { background: linear-gradient(135deg, #004225, #059669); color: #eafff5; border-color: rgba(52,211,153,.35); }
     .pg-btn.primary:hover { color: #ffffff; }
     .pg-btn.danger { border-color: rgba(248, 113, 113, 0.35); color: #f87171; }
+    /* ▶ voice previews: a fixed square so the glyph can change (▶ ■ …) without anything moving. */
+    .pg-preview {
+      width: 2.6rem; height: 2.6rem; padding: 0; justify-content: center; flex: 0 0 auto;
+      font-size: 0.85rem; letter-spacing: 0; line-height: 1;
+    }
+    .pg-preview[aria-pressed="true"] { color: #34d399; border-color: rgba(52, 211, 153, 0.5); background: rgba(16, 185, 129, 0.08); }
+    .pg-preview:disabled { cursor: not-allowed; }
     .pg-progress { height: 9px; border-radius: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.07); overflow: hidden; }
     .pg-progress > div { height: 100%; width: 0%; background: linear-gradient(90deg, #059669, #34d399); transition: width .25s ease; }
     .pg-status { color: #94a3b8; font-size: 0.85rem; font-family: "JetBrains Mono", monospace; }
@@ -321,7 +328,8 @@
           <div>
             <div class="pg-label mb-3">02 · The Voice</div>
             <div class="flex flex-wrap items-center gap-3 mb-3">
-              <select id="voice" class="pg-input" style="max-width: 220px"></select>
+              <select id="voice" class="pg-input" style="max-width: 220px" aria-label="Voice"></select>
+              <button id="voice-preview" type="button" class="pg-btn pg-preview" aria-label="Preview matt" aria-pressed="false" title="Hear this voice read the sample sentence">▶</button>
               <span id="voice-character" class="pg-status"></span>
             </div>
             <div class="flex flex-wrap items-center gap-3 mb-2">
@@ -733,8 +741,9 @@
       </div>
       <h2 class="text-4xl md:text-6xl font-black tracking-tight mb-5">Eighteen <span class="text-emerald-400">Built-in</span> Voices.</h2>
       <p class="text-slate-400 max-w-2xl mx-auto text-base md:text-lg">
-        Each preset ships inside the binary as a 4 KB x-vector. Pick one below to load it into
-        the playground, or read a thirty-second script into your microphone and make a nineteenth.
+        Each preset ships inside the binary as a 4 KB x-vector. Press ▶ to hear the same sentence
+        in every voice (no model download needed), pick one to load it into the playground, or
+        read a thirty-second script into your microphone and make a nineteenth.
       </p>
     </div>
     <div id="voice-cards" class="grid md:grid-cols-2 lg:grid-cols-4 gap-5 reveal"></div>

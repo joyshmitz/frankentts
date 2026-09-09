@@ -2,6 +2,11 @@
 
 import { ensureModel, clearCache, cachedBytes } from "./loader.js?v=@SITEV@";
 import { TOTAL_BYTES } from "./model-manifest.js?v=@SITEV@";
+import { PRESETS, PREVIEW_SENTENCE, previewClipUrl } from "./voices.js?v=@SITEV@";
+
+// The deploy stamp (deploy.sh rewrites the token), so static clips ride the same cache-busting
+// as the scripts that reference them.
+const SITE_VERSION = "@SITEV@";
 
 const ui = Object.fromEntries(
   [
@@ -13,6 +18,7 @@ const ui = Object.fromEntries(
     "dl-status",
     "memory-warning",
     "voice",
+    "voice-preview",
     "voice-character",
     "record",
     "record-status",
@@ -241,29 +247,8 @@ function clearError() {
 
 const gigabytes = (bytes) => (bytes / 1024 ** 3).toFixed(2);
 
-// Mirrors PRESET_VOICES in crates/ftts-wasm/src/lib.rs (names and characters only; the
-// vectors stay inside the wasm module). Static so the voice UI renders instantly and the
-// voices section works even before the worker finishes booting.
-const PRESETS = [
-  { name: "matt", character: "warm, easy, masculine; the out-of-box default" },
-  { name: "james", character: "natural, conversational, masculine" },
-  { name: "leo", character: "relaxed, resonant, masculine" },
-  { name: "robert", character: "steady, measured, masculine" },
-  { name: "judy", character: "bright, articulate, feminine" },
-  { name: "aria", character: "clear, warm, feminine" },
-  { name: "ember", character: "aria's character, a few semitones deeper" },
-  { name: "liam", character: "thoughtful, engaging, masculine" },
-  { name: "anthony", character: "authoritative, articulate, masculine" },
-  { name: "russell", character: "rich, warm, masculine" },
-  { name: "steve", character: "direct, energetic, masculine" },
-  { name: "daniel", character: "clear, calm, masculine" },
-  { name: "meryl", character: "expressive, poised, feminine" },
-  { name: "laurence", character: "deep, measured, masculine" },
-  { name: "jack", character: "crisp, confident, masculine" },
-  { name: "michael", character: "warm, dynamic, masculine" },
-  { name: "jodie", character: "warm, expressive, feminine" },
-  { name: "denzel", character: "commanding, charismatic, masculine" },
-];
+// PRESETS (the built-in roster) lives in voices.js, imported above, so the Node tests can
+// hold it against the wasm module's table without a DOM.
 
 let clonedVector = null;
 let clonedName = "my voice";
@@ -282,6 +267,183 @@ function setWavBlob(blob) {
   if (lastWavUrl) URL.revokeObjectURL(lastWavUrl);
   lastWavBlob = blob;
   lastWavUrl = URL.createObjectURL(blob);
+}
+
+// ── voice previews ───────────────────────────────────────────────────────────────────────────
+//
+// One fixed sentence in every voice, so voices can be compared before anything is typed and
+// before the model exists in this tab. Presets play pre-rendered clips (site/assets/audio/
+// previews, made by site/scripts/render-voice-previews.sh from the CLI at seed 0), which is
+// why a press answers at once: synthesizing here would take seconds per press and nothing at
+// all until the 1.86 GB download finished. A cloned voice has no clip anywhere, so its preview
+// is synthesized live once the engine is loaded, and kept for the session so the second press
+// is instant. One preview plays at a time, and a preview and the main player never overlap.
+const previewAudio = new Audio();
+previewAudio.preload = "none";
+let activePreview = null; // { button, token, playing } from the press until playback stops
+let previewToken = 0; // bumped on every start/stop, so a slow source cannot start a stale preview
+let clonedPreview = null; // { vector, url }: the live-synthesized clone preview, once per clone
+
+function setPreviewButtonState(button, state) {
+  // One glyph in every state, so the control never changes size and nothing around it moves.
+  const label = button.dataset.previewLabel;
+  if (state === "playing") {
+    button.textContent = "■";
+    button.setAttribute("aria-label", `Stop the preview of ${label}`);
+    button.setAttribute("aria-pressed", "true");
+  } else if (state === "busy") {
+    button.textContent = "…";
+    button.setAttribute("aria-label", `Synthesizing the preview of ${label}; press again to cancel`);
+    button.setAttribute("aria-pressed", "true");
+  } else {
+    button.textContent = "▶";
+    button.setAttribute("aria-label", `Preview ${label}`);
+    button.setAttribute("aria-pressed", "false");
+  }
+}
+
+function makePreviewButton(label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "pg-btn pg-preview";
+  button.dataset.previewLabel = label;
+  button.title = "Hear this voice read the sample sentence";
+  setPreviewButtonState(button, "idle");
+  return button;
+}
+
+function stopPreview() {
+  previewToken += 1;
+  previewAudio.pause();
+  if (activePreview) {
+    const { button } = activePreview;
+    activePreview = null;
+    setPreviewButtonState(button, "idle");
+    // The picker's control froze its availability while live; recompute it now.
+    if (button === ui.voicePreview) updatePreviewControl();
+  }
+}
+
+/// Starts a preview on `button`. `source` is a clip URL, or an async function producing one (the
+/// cloned voice, which synthesizes on first use); a null URL means nothing to play.
+async function playPreview(button, source) {
+  // Pressing the control that is already playing (or synthesizing) stops it.
+  if (activePreview?.button === button) {
+    stopPreview();
+    return;
+  }
+  stopPreview();
+  ui.player.pause();
+  const token = previewToken;
+  activePreview = { button, token };
+  let url = source;
+  if (typeof source === "function") {
+    setPreviewButtonState(button, "busy");
+    try {
+      url = await source();
+    } catch (error) {
+      // Cancelled or superseded while the source was being made: that press already reported.
+      if (token !== previewToken) return;
+      stopPreview();
+      showError(error);
+      return;
+    }
+    if (token !== previewToken) return;
+  }
+  if (!url) {
+    stopPreview();
+    return;
+  }
+  activePreview.playing = true;
+  previewAudio.src = url;
+  setPreviewButtonState(button, "playing");
+  try {
+    await previewAudio.play();
+  } catch (error) {
+    // A superseded play() rejects with AbortError by design; only the live press reports.
+    if (token !== previewToken) return;
+    stopPreview();
+    showError(error);
+  }
+}
+
+// Media events arrive as queued tasks, so one can describe a playback that has since been
+// replaced: the element's `pause` event in particular fires AFTER stopPreview() paused the old
+// clip, by which time a new press may be live (and, for the cloned voice, still synthesizing).
+// Only events about the playback the active press actually started are acted on, which is why
+// nothing here listens to `pause` — an outside pause (media keys) leaves the control lit until
+// it is pressed again, which then stops it, and that is the lesser wrong.
+previewAudio.addEventListener("ended", () => {
+  if (activePreview?.playing) stopPreview();
+});
+previewAudio.addEventListener("error", () => {
+  // A missing or unplayable clip: reset the control; play()'s rejection reports the cause.
+  if (activePreview?.playing) stopPreview();
+});
+// The main player and a preview never talk over each other, in either direction.
+ui.player.addEventListener("play", stopPreview);
+
+/// The cloned voice's preview URL, synthesizing it on first use and caching it per clone. The
+/// engine is busy for those seconds, so the main Synthesize control waits too rather than
+/// queueing a second job behind this one.
+async function clonedPreviewUrl() {
+  if (!clonedVector) return null;
+  if (clonedPreview?.vector === clonedVector) return clonedPreview.url;
+  ui.speak.disabled = true;
+  ui.synthStatus.textContent = `synthesizing a preview of “${clonedName}”… (a few seconds)`;
+  try {
+    const { pcm, sampleRate } = await call("synthesize", {
+      text: PREVIEW_SENTENCE,
+      seed: 0,
+      voiceVector: clonedVector,
+    });
+    if (clonedPreview?.url) URL.revokeObjectURL(clonedPreview.url);
+    clonedPreview = {
+      vector: clonedVector,
+      url: URL.createObjectURL(pcmToWavBlob(new Float32Array(pcm), sampleRate)),
+    };
+    return clonedPreview.url;
+  } finally {
+    ui.synthStatus.textContent = "";
+    // Only reachable while the engine was loaded and idle (that is when the control is enabled).
+    ui.speak.disabled = false;
+  }
+}
+
+/// The preview control beside the voice picker follows the selection: a preset plays its clip
+/// at any time; the cloned voice needs a clone AND a loaded, idle engine, and says so.
+function updatePreviewControl() {
+  const button = ui.voicePreview;
+  if (!button) return;
+  // A live preview keeps its state until it stops: Synthesize is disabled DURING the cloned
+  // preview's own synthesis, and refreshing here would cancel exactly the press that caused it.
+  if (activePreview?.button === button) return;
+  const cloned = ui.voice.value === "__cloned__";
+  button.dataset.previewLabel = cloned ? `“${clonedName}”` : ui.voice.value;
+  setPreviewButtonState(button, "idle");
+  if (cloned) {
+    const ready = Boolean(clonedVector) && !ui.speak.disabled;
+    button.disabled = !ready;
+    button.title = ready
+      ? "Hear your cloned voice read the sample sentence (synthesized here, once)"
+      : "A cloned voice is previewed by synthesizing it here, so the model must be loaded first";
+  } else {
+    button.disabled = false;
+    button.title = "Hear this voice read the sample sentence";
+  }
+}
+if (ui.voicePreview) {
+  ui.voicePreview.addEventListener("click", () => {
+    const button = ui.voicePreview;
+    if (ui.voice.value === "__cloned__") playPreview(button, clonedPreviewUrl);
+    else playPreview(button, previewClipUrl(ui.voice.value, SITE_VERSION));
+  });
+  // Synthesize's enabled state IS "engine loaded and idle"; every path that flips it (load,
+  // synthesis start/end, cache clear) is a moment the cloned preview's availability changes.
+  new MutationObserver(updatePreviewControl).observe(ui.speak, {
+    attributes: true,
+    attributeFilter: ["disabled"],
+  });
 }
 
 for (const preset of PRESETS) {
@@ -503,6 +665,10 @@ function updateVoiceCharacter() {
   const preset = PRESETS.find((p) => p.name === ui.voice.value);
   ui.voiceCharacter.textContent =
     ui.voice.value === "__cloned__" ? `“${clonedName}”, locally cloned` : (preset?.character ?? "");
+  // A different voice means a different preview: stop the picker's control if it is live
+  // (which also refreshes it), otherwise just refresh it.
+  if (activePreview?.button === ui.voicePreview) stopPreview();
+  else updatePreviewControl();
 }
 ui.voice.addEventListener("change", updateVoiceCharacter);
 
@@ -531,7 +697,16 @@ function buildVoiceCards(presets) {
       updateVoiceCharacter();
       jumpToPlayground(ui.text);
     });
-    card.append(name, character, use);
+    // The clip plays right here, before the model exists: comparing eighteen voices must not
+    // cost eighteen trips to the playground.
+    const preview = makePreviewButton(preset.name);
+    preview.addEventListener("click", () =>
+      playPreview(preview, previewClipUrl(preset.name, SITE_VERSION)),
+    );
+    const actions = document.createElement("div");
+    actions.className = "flex flex-wrap items-center gap-2";
+    actions.append(preview, use);
+    card.append(name, character, actions);
     ui.voiceCards.appendChild(card);
   }
   const cloneCard = document.createElement("div");
@@ -560,7 +735,7 @@ ui.text.addEventListener("input", updateCharCount);
 // One-click sample texts, kept short so a first try returns quickly. At 0.31x real time a
 // sentence is seconds of compute rather than the minutes the single-threaded build cost.
 const SAMPLE_TEXTS = [
-  "Now is the time for all good men to come to the aid of the agents.",
+  PREVIEW_SENTENCE, // what every ▶ preview says, so Synthesize reproduces what was just heard
   "When sunlight strikes raindrops in the air, they act as a prism and form a rainbow.",
   "I am a voice model running in a browser tab, with no server behind me.",
 ];

@@ -861,6 +861,32 @@ pub const EVENTS: &[EventSpec] = &[
             },
         ],
     },
+    EventSpec {
+        name: "preset_voices",
+        kind: Kind::Reply,
+        stream: Stream::Events,
+        summary: "answers `voices`: the built-in roster, in table order",
+        fields: &[
+            FieldSpec {
+                name: "voices",
+                ty: "array",
+                required: true,
+                summary: "one {name, character, default} object per built-in voice",
+            },
+            FieldSpec {
+                name: "default_voice",
+                ty: "string",
+                required: true,
+                summary: "the preset used when nothing else names a voice",
+            },
+            FieldSpec {
+                name: "preview_sentence",
+                ty: "string",
+                required: true,
+                summary: "what `voices --preview NAME` (and the playground's ▶) says",
+            },
+        ],
+    },
 ];
 
 /// Look up one event's specification by name.
@@ -889,6 +915,7 @@ pub enum EventType {
     Backends,
     Selftest,
     VoiceInspect,
+    PresetVoices,
 }
 
 impl EventType {
@@ -907,6 +934,7 @@ impl EventType {
             Self::Backends => "backends",
             Self::Selftest => "selftest",
             Self::VoiceInspect => "voice_inspect",
+            Self::PresetVoices => "preset_voices",
         }
     }
 
@@ -1388,6 +1416,7 @@ mod tests {
             EventType::Backends,
             EventType::Selftest,
             EventType::VoiceInspect,
+            EventType::PresetVoices,
         ] {
             let spec = variant.spec();
             assert_eq!(spec.name, variant.name());

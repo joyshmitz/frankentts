@@ -142,6 +142,11 @@ const PRESET_VOICES: &[(&str, &str, &[u8])] = &[
 /// absent, so a fresh install speaks out of the box.
 const DEFAULT_PRESET_VOICE: &str = "matt";
 
+/// The sentence every voice preview speaks: `ftts voices --preview`, the playground's ▶
+/// controls, and the pre-rendered clips in site/assets/audio/previews. The site's copy is
+/// PREVIEW_SENTENCE in site/voices.js; site/voices.test.js fails when the two differ.
+const PREVIEW_SENTENCE: &str = "Now is the time for all good men to come to the aid of the agents.";
+
 /// Names a preset resolves to a temp-materialized `.spk` path the existing voice loaders read.
 ///
 /// Only fires when the value is NOT an existing file, so a file named like a preset still wins.
@@ -341,6 +346,8 @@ enum Command {
     Enroll(EnrollArgs),
     /// Inspect a portable voice pack.
     Voice(VoiceArgs),
+    /// List the built-in voices, or render one's preview sentence.
+    Voices(VoicesArgs),
     /// Export or import a voice card: a picture that carries the voice itself,
     /// interchangeable with the iOS app.
     Card(CardArgs),
@@ -605,6 +612,27 @@ struct VoiceArgs {
 enum VoiceCommand {
     /// Inspect a .ftvoice header without synthesizing.
     Inspect { path: PathBuf },
+}
+
+#[derive(Debug, clap::Args)]
+struct VoicesArgs {
+    /// Instead of listing, synthesize the preview sentence in this built-in voice — the
+    /// same sentence the playground's ▶ controls play, so a voice sounds the same on both.
+    #[arg(long, value_name = "NAME")]
+    preview: Option<String>,
+
+    /// Where `--preview` writes its audio. The format follows the extension exactly as in
+    /// `say`. Default: ./ftts-preview-<NAME>.wav
+    #[arg(short = 'o', long, value_name = "PATH", requires = "preview")]
+    output: Option<PathBuf>,
+
+    /// Explicit .fttsq model artifact for `--preview`. No network lookup is performed.
+    #[arg(long, value_name = "PATH", requires = "preview")]
+    model: Option<PathBuf>,
+
+    /// Load the model in this process instead of using the resident engine.
+    #[arg(long, requires = "preview")]
+    no_resident: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -979,6 +1007,9 @@ fn dispatch(
         Command::Voice(VoiceArgs {
             command: VoiceCommand::Inspect { path },
         }) => run_voice_inspect(path, stdout),
+        Command::Voices(args) => {
+            run_voices(&cli, args, environment, stdin, stdout, stderr, capabilities)
+        }
         Command::Card(args) => run_card(args, stdout),
         Command::Convert(args) => run_convert(&cli, args, environment, stdout, stderr),
         Command::Pull(args) => run_pull(args, environment, stdout),
@@ -3966,6 +3997,96 @@ fn run_card(args: &CardArgs, stdout: &mut dyn Write) -> Result<(), FttsError> {
     }
 }
 
+/// `ftts voices`: the built-in roster, or (`--preview NAME`) the preview sentence in one voice.
+///
+/// A terminal gets a readable table and nothing else; a pipe gets exactly one `preset_voices`
+/// NDJSON event — the two views are never mixed on one stream. `--preview` is `say` with the
+/// text, voice, and output fixed, so its event stream and exit codes are `say`'s own.
+fn run_voices(
+    cli: &Cli,
+    args: &VoicesArgs,
+    environment: &Environment,
+    stdin: &mut dyn Read,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    capabilities: IoCapabilities,
+) -> Result<(), FttsError> {
+    let Some(name) = &args.preview else {
+        return list_preset_voices(stdout, capabilities.human_output);
+    };
+    // Refused here, by name, before any model is touched: a raw "no such file" from the voice
+    // loader would hide that the problem is a typo'd preset.
+    if !PRESET_VOICES.iter().any(|(preset, _, _)| preset == name) {
+        return Err(FttsError::Input(format!(
+            "`{name}` is not a built-in voice (those are: {})",
+            preset_names()
+        )));
+    }
+    let say = SayArgs {
+        text: Some(PREVIEW_SENTENCE.to_owned()),
+        output_positional: None,
+        file: None,
+        model: args.model.clone(),
+        voice: Some(PathBuf::from(name)),
+        output: Some(
+            args.output
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(format!("ftts-preview-{name}.wav"))),
+        ),
+        stream: None,
+        check: false,
+        robot: false,
+        no_resident: args.no_resident,
+    };
+    run_say(cli, &say, environment, stdin, stdout, stderr, capabilities)
+}
+
+fn list_preset_voices(stdout: &mut dyn Write, human: bool) -> Result<(), FttsError> {
+    if !human {
+        let mut event = robot::EventType::PresetVoices.event();
+        event.insert(
+            "voices".to_owned(),
+            json!(
+                PRESET_VOICES
+                    .iter()
+                    .map(|(name, character, _)| json!({
+                        "name": name,
+                        "character": character,
+                        "default": *name == DEFAULT_PRESET_VOICE,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+        event.insert("default_voice".to_owned(), json!(DEFAULT_PRESET_VOICE));
+        event.insert("preview_sentence".to_owned(), json!(PREVIEW_SENTENCE));
+        return write_json_line(stdout, &Value::Object(event));
+    }
+    let width = PRESET_VOICES
+        .iter()
+        .map(|(name, _, _)| name.len())
+        .max()
+        .unwrap_or(0);
+    writeln!(
+        stdout,
+        "{} built-in voices (use one with --voice NAME):",
+        PRESET_VOICES.len()
+    )
+    .map_err(output_error)?;
+    for (name, character, _) in PRESET_VOICES {
+        let default = if *name == DEFAULT_PRESET_VOICE {
+            "  (default)"
+        } else {
+            ""
+        };
+        writeln!(stdout, "  {name:<width$}  {character}{default}").map_err(output_error)?;
+    }
+    writeln!(
+        stdout,
+        "\nhear one: ftts voices --preview NAME   (says \"{PREVIEW_SENTENCE}\")"
+    )
+    .map_err(output_error)
+}
+
 fn run_voice_inspect(path: &Path, stdout: &mut dyn Write) -> Result<(), FttsError> {
     let path = resolve_existing_file(path, "voice pack")?;
     let bytes = std::fs::read(path)
@@ -5519,6 +5640,129 @@ mod tests {
         let header = std::fs::read(&empty_plan.final_path).expect("finalized wav");
         assert!(header.len() >= 44, "RIFF header present: {}", header.len());
         assert_eq!(&header[..4], b"RIFF", "must be a parseable RIFF file");
+    }
+
+    #[test]
+    fn voices_lists_the_whole_roster_as_one_event_when_piped() {
+        let cli = Cli::parse_from(["ftts", "voices"]);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut stdin: &[u8] = &[];
+        dispatch(
+            cli,
+            environment(),
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            IoCapabilities::default(),
+        )
+        .expect("listing needs no model");
+        let text = String::from_utf8(stdout).expect("utf-8 output");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "piped output is exactly one NDJSON line: {text}"
+        );
+        let event: serde_json::Value = serde_json::from_str(lines[0]).expect("json event");
+        assert_eq!(event["event"], "preset_voices");
+        assert_eq!(event["schema_version"], json!(ROBOT_SCHEMA_VERSION));
+        assert_eq!(event["default_voice"], DEFAULT_PRESET_VOICE);
+        assert_eq!(event["preview_sentence"], PREVIEW_SENTENCE);
+        let listed: Vec<&str> = event["voices"]
+            .as_array()
+            .expect("voices array")
+            .iter()
+            .map(|voice| voice["name"].as_str().expect("name"))
+            .collect();
+        let expected: Vec<&str> = PRESET_VOICES.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(listed, expected, "every preset, in table order");
+        for voice in event["voices"].as_array().unwrap() {
+            assert!(!voice["character"].as_str().unwrap().is_empty());
+            assert_eq!(voice["default"], voice["name"] == DEFAULT_PRESET_VOICE);
+        }
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn voices_human_view_names_every_preset_without_json() {
+        let cli = Cli::parse_from(["ftts", "voices"]);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut stdin: &[u8] = &[];
+        dispatch(
+            cli,
+            environment(),
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            IoCapabilities {
+                human_output: true,
+                can_confirm: false,
+            },
+        )
+        .expect("listing needs no model");
+        let text = String::from_utf8(stdout).expect("utf-8 output");
+        for (name, character, _) in PRESET_VOICES {
+            let line = text
+                .lines()
+                .find(|line| line.trim_start().starts_with(name))
+                .unwrap_or_else(|| panic!("{name} missing from the human view:\n{text}"));
+            assert!(line.contains(character), "{name}'s character line is shown");
+        }
+        assert!(
+            text.contains("(default)") && text.contains(PREVIEW_SENTENCE),
+            "the default is marked and the preview sentence is spelled out:\n{text}"
+        );
+        assert!(
+            !text.lines().any(|line| line.starts_with('{')),
+            "a terminal never sees NDJSON mixed into the table:\n{text}"
+        );
+    }
+
+    #[test]
+    fn voices_preview_refuses_an_unknown_name_before_touching_the_model() {
+        let cli = Cli::parse_from(["ftts", "voices", "--preview", "nobody"]);
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut stdin: &[u8] = &[];
+        let error = dispatch(
+            cli,
+            environment(),
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            IoCapabilities::default(),
+        )
+        .expect_err("an unknown preset is an input error");
+        let message = error.to_string();
+        assert!(
+            message.contains("`nobody` is not a built-in voice") && message.contains("matt"),
+            "names the roster: {message}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "no events before the refusal: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn voices_preview_flags_require_a_preview() {
+        for args in [
+            ["ftts", "voices", "-o", "x.wav"],
+            ["ftts", "voices", "--model", "m.fttsq"],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "{args:?} must be rejected without --preview"
+            );
+        }
+        let cli = Cli::parse_from(["ftts", "voices", "--preview", "aria", "-o", "a.mp3"]);
+        let Command::Voices(args) = cli.command else {
+            panic!("parsed as another command")
+        };
+        assert_eq!(args.preview.as_deref(), Some("aria"));
+        assert_eq!(args.output.as_deref(), Some(Path::new("a.mp3")));
     }
 
     #[test]

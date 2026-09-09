@@ -64,7 +64,7 @@ ftts say "Hello in my own voice" hello.m4a
 ftts say --voice matt "And back to a built-in one" matt.m4a
 ```
 
-The built-ins are ordinary enrolled x-vectors, each approved by listening before it shipped. The model installs into `~/.cache/franken_tts/model` and every command finds it there automatically; `--model` and `FTTS_MODEL_DIR` remain available to point elsewhere.
+`ftts voices` lists the built-ins with a one-line character each (one NDJSON `preset_voices` event when piped), and `ftts voices --preview aria` renders the fixed preview sentence in a voice — the same sentence the playground's ▶ controls play, so a voice sounds the same on both — to `ftts-preview-aria.wav` (or `-o` any `say` output format). The built-ins are ordinary enrolled x-vectors, each approved by listening before it shipped. The model installs into `~/.cache/franken_tts/model` and every command finds it there automatically; `--model` and `FTTS_MODEL_DIR` remain available to point elsewhere.
 
 The output format follows the extension. `.wav` comes straight from the built-in pure-Rust encoder; `.m4a`, `.mp3`, and `.flac` are converted from that WAV by whichever system encoder is present (`afconvert` on macOS, `ffmpeg`, `lame`, `flac`), and if none is found you get an error naming the tools rather than a silently different format. Generation stops at the model's EOS, with a text-proportional frame cap as a backstop; set `FTTS_MAX_FRAMES` only when you want an exact cap. `--model`, `--voice`, and `-o` remain available for explicit control.
 

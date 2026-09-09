@@ -232,6 +232,20 @@ else
     stage_skip "node not installed; site/sha256.test.js NOT run"
 fi
 
+# The built-in voice roster is written down in the wasm module, the CLI, the page, and the
+# directory of pre-rendered preview clips, and none of them can import the others. This holds
+# them together (and the preview sentence with them), so a preset added to the engine without a
+# clip, or a heading that still counts the old roster, fails here rather than on the live site.
+stage_start "site voice roster and preview clips"
+if command -v node >/dev/null 2>&1; then
+    if ! node site/voices.test.js; then
+        stage_fail "site/voices.js, the engine rosters, and site/assets/audio/previews disagree"
+    fi
+    stage_pass
+else
+    stage_skip "node not installed; site/voices.test.js NOT run"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3c. The site actually loads and synthesizes IN A REAL BROWSER
 # ─────────────────────────────────────────────────────────────────────────────

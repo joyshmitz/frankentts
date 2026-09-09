@@ -42,6 +42,8 @@
   Cache-Control: no-cache
 /model-manifest.js
   Cache-Control: no-cache
+/voices.js
+  Cache-Control: no-cache
 
 /pkg/*
   Cache-Control: no-cache

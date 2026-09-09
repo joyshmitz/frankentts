@@ -21,6 +21,7 @@ const MIME = {
   ".json": "application/json; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
+  ".mp3": "audio/mpeg",
 };
 
 /// The global headers from site/_headers, parsed rather than duplicated.
